@@ -1,0 +1,43 @@
+#!/usr/bin/env -S python3 -u
+
+# Aditya: implement the receiver here.
+# See README.md for what's done and what you need to build.
+
+import argparse
+import socket
+import select
+import sys
+
+
+class Receiver:
+    def __init__(self):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("0.0.0.0", 0))
+        self.port = self.socket.getsockname()[1]
+        self.log("Bound to port %d" % self.port)
+
+        self.remote_host = None
+        self.remote_port = None
+
+    def log(self, message):
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+
+    def run(self):
+        while True:
+            socks = select.select([self.socket], [], [])[0]
+            for conn in socks:
+                data, addr = conn.recvfrom(65535)
+                if self.remote_host is None:
+                    self.remote_host = addr[0]
+                    self.remote_port = addr[1]
+                if addr != (self.remote_host, self.remote_port):
+                    self.log("Error: Received response from unexpected remote; ignoring")
+                    continue
+                self.log("Received message %s" % data.decode("utf-8"))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="receive data")
+    args = parser.parse_args()
+    Receiver().run()

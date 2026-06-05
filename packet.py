@@ -1,4 +1,4 @@
- #!/usr/bin/env python3
+#!/usr/bin/env python3
 
 import json
 import zlib
@@ -83,14 +83,14 @@ def make_data_packet(seq, payload):
     }
 
 
-def make_ack_packet(seq):
+def make_ack_packet(next_expected):
     """
-    Create an ACK packet.
+    Create an ACK packet. ack is the next seq number the receiver expects.
     """
 
     return {
         "type": "ack",
-        "ack": seq
+        "ack": next_expected
     }
 
 

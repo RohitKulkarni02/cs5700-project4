@@ -1,0 +1,224 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse
+import select
+import socket
+import sys
+import time
+
+from packet import (
+    MAX_PAYLOAD_SIZE,
+    decode_packet,
+    encode_packet,
+    make_data_packet,
+    make_fin_packet,
+)
+
+INITIAL_WINDOW = 4
+MAX_WINDOW = 32
+INITIAL_RTO = 1.0
+MIN_RTO = 0.25
+
+
+class Sender:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = int(port)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("0.0.0.0", 0))
+
+        self.remote_host = None
+        self.remote_port = None
+
+        self.base = 0
+        self.next_seq = 0
+        self.window = INITIAL_WINDOW
+
+        self.packets = {}
+        self.fin_seq = None
+        self.fin_sent = False
+        self.done = False
+
+        self.rto = INITIAL_RTO
+        self.srtt = None
+        self.rttvar = None
+        self.timer_start = None
+        self.last_ack = -1
+        self.dup_acks = 0
+
+        self.stdin_eof = False
+        self.log("Sender starting up using port %s" % self.port)
+
+    def log(self, message):
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+
+    def send_bytes(self, raw):
+        self.socket.sendto(raw, (self.host, self.port))
+
+    def send_data(self, seq, payload):
+        packet = make_data_packet(seq, payload)
+        raw = encode_packet(packet)
+        self.packets[seq] = raw
+        self.send_bytes(raw)
+        self.log("Sending message '%s'" % raw.decode("utf-8"))
+
+    def send_fin(self):
+        packet = make_fin_packet(self.fin_seq)
+        raw = encode_packet(packet)
+        self.packets[self.fin_seq] = raw
+        self.fin_sent = True
+        self.send_bytes(raw)
+        self.log("Sending message '%s'" % raw.decode("utf-8"))
+
+    def update_rto(self, sample):
+        if self.srtt is None:
+            self.srtt = sample
+            self.rttvar = sample / 2.0
+        else:
+            alpha = 0.125
+            beta = 0.25
+            self.rttvar = (1 - beta) * self.rttvar + beta * abs(self.srtt - sample)
+            self.srtt = (1 - alpha) * self.srtt + alpha * sample
+        self.rto = max(MIN_RTO, 2 * self.srtt)
+
+    def start_timer(self):
+        self.timer_start = time.time()
+
+    def timer_expired(self):
+        if self.timer_start is None:
+            return False
+        return (time.time() - self.timer_start) >= self.rto
+
+    def in_flight(self):
+        if self.fin_sent:
+            return self.base <= self.fin_seq
+        return self.base < self.next_seq
+
+    def can_send_more(self):
+        return (self.next_seq - self.base) < self.window
+
+    def retransmit_from_base(self):
+        end = self.next_seq if not self.fin_sent else self.fin_seq + 1
+        for seq in range(self.base, end):
+            if seq in self.packets:
+                self.send_bytes(self.packets[seq])
+                self.log("Retransmitting seq %d" % seq)
+                break
+
+    def retransmit_all_unacked(self):
+        end = self.next_seq if not self.fin_sent else self.fin_seq + 1
+        for seq in range(self.base, end):
+            if seq in self.packets:
+                self.send_bytes(self.packets[seq])
+
+    def handle_ack(self, ack_num):
+        if ack_num < self.base:
+            return
+
+        if ack_num == self.base:
+            self.dup_acks += 1
+            if self.dup_acks >= 3:
+                self.retransmit_from_base()
+                self.dup_acks = 0
+            return
+
+        if self.timer_start is not None:
+            self.update_rto(time.time() - self.timer_start)
+
+        self.dup_acks = 0
+        self.last_ack = ack_num
+        self.window = min(self.window + 1, MAX_WINDOW)
+
+        for seq in list(self.packets.keys()):
+            if seq < ack_num:
+                del self.packets[seq]
+
+        self.base = ack_num
+        self.start_timer()
+
+        if self.stdin_eof and not self.fin_sent and self.base == self.next_seq:
+            self.fin_seq = self.next_seq
+            self.send_fin()
+            self.start_timer()
+
+        if self.fin_sent and self.base > self.fin_seq:
+            self.log("All done!")
+            self.done = True
+
+    def handle_incoming(self):
+        data, addr = self.socket.recvfrom(65535)
+
+        if self.remote_host is None:
+            self.remote_host = addr[0]
+            self.remote_port = addr[1]
+
+        if addr != (self.remote_host, self.remote_port):
+            self.log("Error: Received response from unexpected remote; ignoring")
+            return
+
+        self.log("Received message %s" % data)
+
+        packet = decode_packet(data)
+        if packet is None:
+            return
+
+        if packet.get("type") != "ack":
+            return
+
+        if "ack" not in packet:
+            return
+
+        self.handle_ack(packet["ack"])
+
+    def read_stdin(self):
+        chunk = sys.stdin.buffer.read(MAX_PAYLOAD_SIZE)
+        if len(chunk) == 0:
+            self.stdin_eof = True
+            if self.base == self.next_seq and not self.fin_sent:
+                self.fin_seq = self.next_seq
+                self.send_fin()
+                self.start_timer()
+            return
+
+        self.send_data(self.next_seq, chunk)
+        if self.timer_start is None:
+            self.start_timer()
+        self.next_seq += 1
+
+    def run(self):
+        while not self.done:
+            timeout = None
+            if self.in_flight():
+                if self.timer_start is None:
+                    self.start_timer()
+                remaining = self.rto - (time.time() - self.timer_start)
+                timeout = max(0.0, remaining)
+
+            readfds = [self.socket]
+            if not self.stdin_eof and self.can_send_more():
+                readfds.append(sys.stdin)
+
+            ready, _, _ = select.select(readfds, [], [], timeout)
+
+            for fd in ready:
+                if fd == self.socket:
+                    self.handle_incoming()
+                elif fd == sys.stdin:
+                    self.read_stdin()
+
+            if self.timer_expired() and self.in_flight():
+                self.log("Timeout, retransmitting")
+                self.window = max(1, self.window // 2)
+                self.retransmit_all_unacked()
+                self.rto = min(self.rto * 2, 30.0)
+                self.start_timer()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="send data")
+    parser.add_argument("host", type=str, help="Remote host to connect to")
+    parser.add_argument("port", type=int, help="UDP port number to connect to")
+    args = parser.parse_args()
+
+    Sender(args.host, args.port).run()

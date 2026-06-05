@@ -1,12 +1,11 @@
 #!/usr/bin/env -S python3 -u
 
-# Aditya: implement the receiver here.
-# See README.md for what's done and what you need to build.
-
 import argparse
 import socket
 import select
 import sys
+
+from packet import decode_packet, encode_packet, make_ack_packet, extract_payload
 
 
 class Receiver:
@@ -16,25 +15,68 @@ class Receiver:
         self.port = self.socket.getsockname()[1]
         self.log("Bound to port %d" % self.port)
 
-        self.remote_host = None
-        self.remote_port = None
+        self.remote = None
+
+        self.next_expected = 0
+        self.buffer = {}
+        self.fin_seq = None
 
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
+
+    def write_payload(self, payload):
+        sys.stdout.buffer.write(payload)
+        sys.stdout.buffer.flush()
+
+    def send_ack(self, addr):
+        raw = encode_packet(make_ack_packet(self.next_expected))
+        self.socket.sendto(raw, addr)
+        self.log("Sending ack %d" % self.next_expected)
+
+    def drain(self):
+        while self.next_expected in self.buffer:
+            self.write_payload(self.buffer.pop(self.next_expected))
+            self.next_expected += 1
+        if self.fin_seq is not None and self.next_expected == self.fin_seq:
+            self.next_expected += 1
+
+    def handle_data(self, packet):
+        seq = packet["seq"]
+        if seq >= self.next_expected and seq not in self.buffer:
+            self.buffer[seq] = extract_payload(packet)
+        self.drain()
+
+    def handle_fin(self, packet):
+        self.fin_seq = packet["seq"]
+        self.drain()
 
     def run(self):
         while True:
             socks = select.select([self.socket], [], [])[0]
             for conn in socks:
                 data, addr = conn.recvfrom(65535)
-                if self.remote_host is None:
-                    self.remote_host = addr[0]
-                    self.remote_port = addr[1]
-                if addr != (self.remote_host, self.remote_port):
+
+                packet = decode_packet(data)
+                if packet is None:
+                    continue
+
+                if self.remote is None:
+                    self.remote = addr
+
+                if addr != self.remote:
                     self.log("Error: Received response from unexpected remote; ignoring")
                     continue
-                self.log("Received message %s" % data.decode("utf-8"))
+
+                self.log("Received message %s" % data)
+
+                ptype = packet.get("type")
+                if ptype == "data" and "seq" in packet and "data" in packet:
+                    self.handle_data(packet)
+                    self.send_ack(addr)
+                elif ptype == "fin" and "seq" in packet:
+                    self.handle_fin(packet)
+                    self.send_ack(addr)
 
 
 if __name__ == "__main__":

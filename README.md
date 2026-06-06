@@ -8,7 +8,7 @@ A UDP-based reliable transport for sending a file from stdin to a remote receive
 - `4700recv` - receiver. Binds a UDP port, prints data to stdout, sends ACKs.
 - `packet.py` - shared packet encoding, checksums, and helpers.
 - `Makefile` - runs `chmod +x` on both programs.
-- `run` - simulator (do not modify).
+- `run` - simulator.
 - `test` - runs all config files in `configs/`.
 - `configs/` - network test configs from the starter repo.
 - `README.md` - this file.
@@ -32,7 +32,7 @@ Manual test in two terminals:
 # terminal 1
 ./4700recv
 
-# terminal 2 (use the port printed by the receiver)
+# terminal 2 - use the port printed by the receiver
 echo "hello world" | ./4700send 127.0.0.1 <port>
 ```
 

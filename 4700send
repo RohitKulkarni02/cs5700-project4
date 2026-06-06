@@ -14,10 +14,12 @@ from packet import (
     make_fin_packet,
 )
 
-INITIAL_WINDOW = 4
-MAX_WINDOW = 32
-INITIAL_RTO = 1.0
-MIN_RTO = 0.25
+INITIAL_WINDOW = 3
+MAX_WINDOW = 20
+INITIAL_RTO = 0.5
+MIN_RTO = 0.1
+MAX_RTO = 10.0
+FIRST_ACK_RTO = 1.0
 
 
 class Sender:
@@ -80,15 +82,20 @@ class Sender:
             beta = 0.25
             self.rttvar = (1 - beta) * self.rttvar + beta * abs(self.srtt - sample)
             self.srtt = (1 - alpha) * self.srtt + alpha * sample
-        self.rto = max(MIN_RTO, 2 * self.srtt)
+        self.rto = max(MIN_RTO, 2 * self.srtt, self.srtt + 4 * self.rttvar)
 
     def start_timer(self):
         self.timer_start = time.time()
 
+    def effective_rto(self):
+        if self.srtt is None:
+            return max(self.rto, FIRST_ACK_RTO)
+        return self.rto
+
     def timer_expired(self):
         if self.timer_start is None:
             return False
-        return (time.time() - self.timer_start) >= self.rto
+        return (time.time() - self.timer_start) >= self.effective_rto()
 
     def in_flight(self):
         if self.fin_sent:
@@ -99,18 +106,17 @@ class Sender:
         return (self.next_seq - self.base) < self.window
 
     def retransmit_from_base(self):
-        end = self.next_seq if not self.fin_sent else self.fin_seq + 1
-        for seq in range(self.base, end):
-            if seq in self.packets:
-                self.send_bytes(self.packets[seq])
-                self.log("Retransmitting seq %d" % seq)
-                break
+        if self.base in self.packets:
+            self.send_bytes(self.packets[self.base])
+            self.log("Retransmitting seq %d" % self.base)
 
-    def retransmit_all_unacked(self):
+    def retransmit_window(self):
         end = self.next_seq if not self.fin_sent else self.fin_seq + 1
-        for seq in range(self.base, end):
+        stop = min(end, self.base + min(self.window, 4))
+        for seq in range(self.base, stop):
             if seq in self.packets:
                 self.send_bytes(self.packets[seq])
+        self.log("Retransmitting seq %d-%d" % (self.base, stop - 1))
 
     def handle_ack(self, ack_num):
         if ack_num < self.base:
@@ -118,7 +124,7 @@ class Sender:
 
         if ack_num == self.base:
             self.dup_acks += 1
-            if self.dup_acks >= 3:
+            if self.dup_acks >= 2:
                 self.retransmit_from_base()
                 self.dup_acks = 0
             return
@@ -145,6 +151,15 @@ class Sender:
         if self.fin_sent and self.base > self.fin_seq:
             self.log("All done!")
             self.done = True
+
+        self.fill_window()
+
+    def fill_window(self):
+        while self.can_send_more() and not self.stdin_eof:
+            before = self.next_seq
+            self.read_stdin()
+            if self.next_seq == before:
+                break
 
     def handle_incoming(self):
         data, addr = self.socket.recvfrom(65535)
@@ -187,12 +202,13 @@ class Sender:
         self.next_seq += 1
 
     def run(self):
+        self.fill_window()
         while not self.done:
             timeout = None
             if self.in_flight():
                 if self.timer_start is None:
                     self.start_timer()
-                remaining = self.rto - (time.time() - self.timer_start)
+                remaining = self.effective_rto() - (time.time() - self.timer_start)
                 timeout = max(0.0, remaining)
 
             readfds = [self.socket]
@@ -205,13 +221,16 @@ class Sender:
                 if fd == self.socket:
                     self.handle_incoming()
                 elif fd == sys.stdin:
-                    self.read_stdin()
+                    self.fill_window()
+
+            if not self.stdin_eof and self.can_send_more():
+                self.fill_window()
 
             if self.timer_expired() and self.in_flight():
                 self.log("Timeout, retransmitting")
                 self.window = max(1, self.window // 2)
-                self.retransmit_all_unacked()
-                self.rto = min(self.rto * 2, 30.0)
+                self.retransmit_window()
+                self.rto = min(self.rto * 1.5, MAX_RTO)
                 self.start_timer()
 
 

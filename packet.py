@@ -6,7 +6,7 @@ import base64
 
 
 MAX_PACKET_SIZE = 1500
-MAX_PAYLOAD_SIZE = 1200
+MAX_PAYLOAD_SIZE = 1070
 
 
 def compute_checksum(packet):

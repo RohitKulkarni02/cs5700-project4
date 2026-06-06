@@ -1,167 +1,110 @@
 # CS 5700 Project 4 - Reliable Transport
 
-**Split:** Rohit = `4700send` (done), you = `4700recv` (your part).
+A UDP-based reliable transport for sending a file from stdin to a remote receiver. `4700send` reads data, breaks it into packets, and sends them over UDP. `4700recv` receives packets, prints the data to stdout in order, and sends ACKs back. The simulator in `run` drops, delays, reorders, duplicates, and corrupts packets to test that the transfer still works.
 
----
+## Files
 
-## What's already done
+- `4700send` - sender. Reads stdin, sends data packets, handles retransmits.
+- `4700recv` - receiver. Binds a UDP port, prints data to stdout, sends ACKs.
+- `packet.py` - shared packet encoding, checksums, and helpers.
+- `Makefile` - runs `chmod +x` on both programs.
+- `run` - simulator (do not modify).
+- `test` - runs all config files in `configs/`.
+- `configs/` - network test configs from the starter repo.
+- `README.md` - this file.
 
-### `4700send` (Rohit)
+## Build and run
 
-The sender is fully implemented. It:
-
-- Reads from stdin until EOF, chunks data into 1200-byte packets
-- Sends `data` packets with seq numbers `0, 1, 2, ...`
-- Uses a sliding window (Go-Back-N), window starts at 4
-- Retransmits on timeout; does fast retransmit after 3 duplicate ACKs
-- Adjusts timeout based on RTT (starts at 1 second)
-- After all data is acked, sends a `fin` packet
-- Exits once `fin` is acked — prints `All done!` to stderr
-
-### `packet.py` (shared)
-
-Both programs use this file. It handles:
-
-- JSON packet encoding/decoding
-- CRC32 checksums (drop corrupted packets if `decode_packet` returns `None`)
-- Helpers: `make_data_packet`, `make_ack_packet`, `make_fin_packet`, `extract_payload`
-
-### `Makefile`
-
-Just runs `chmod +x` on both scripts. Already set up.
-
-### `4700recv` (stub only)
-
-Right now it only binds to a port, prints `Bound to port <port>`, and logs incoming packets. **You need to implement the actual receiver logic here.**
-
----
-
-## What you need to do (`4700recv`)
-
-Build the receiver so it works with the sender's protocol below. Keep the starter-code style (class-based, log to stderr, print data to stdout).
-
-### Required behavior (from the spec)
-
-1. On startup, bind UDP and print exactly this as the **first** stderr line:
-  ```
-   Bound to port <port>
-  ```
-2. Receive packets from the sender, print the data to **stdout** in order with no errors
-3. Send ACKs back over UDP
-4. **Do not exit** on your own — the simulator kills the receiver after the sender exits
-
-### Protocol to implement
-
-All packets are JSON. Use `encode_packet` / `decode_packet` from `packet.py` for everything.
-
-
-| type   | fields                 | meaning                                 |
-| ------ | ---------------------- | --------------------------------------- |
-| `data` | `seq`, `data` (base64) | one chunk of file data                  |
-| `ack`  | `ack`                  | next seq number you expect (cumulative) |
-| `fin`  | `seq`                  | end of transfer                         |
-
-
-**ACK convention:** `ack` = the next sequence number you are waiting for (TCP-style).
-
-Example: if you've received and printed packets 0, 1, 2 in order, send `ack: 3`.
-
-### Step-by-step logic
-
-```
-next_expected = 0
-buffer = {}   # seq -> bytes, for out-of-order packets
-
-on each incoming UDP packet:
-    pkt = decode_packet(raw)
-    if pkt is None:
-        ignore (corrupted)
-        return
-
-    remember sender's host/port from first valid packet
-    ignore packets from other hosts
-
-    if pkt["type"] == "data":
-        seq = pkt["seq"]
-        if seq < next_expected:
-            pass  # duplicate, don't print again
-        elif seq == next_expected:
-            print extract_payload(pkt) to stdout
-            next_expected += 1
-            # drain buffer for anything now in order
-            while next_expected in buffer:
-                print buffer[next_expected] to stdout
-                del buffer[next_expected]
-                next_expected += 1
-        else:  # seq > next_expected, out of order
-            if seq not in buffer:
-                buffer[seq] = extract_payload(pkt)
-
-    elif pkt["type"] == "fin":
-        if pkt["seq"] == next_expected:
-            next_expected += 1
-        # if fin arrives early, just buffer the situation via normal seq logic
-
-    # always ack after a valid data or fin packet
-    send encode_packet(make_ack_packet(next_expected)) back to sender
+```bash
+make
+./test
 ```
 
-### Imports you'll need
+To run one config:
 
-```python
-from packet import decode_packet, encode_packet, make_ack_packet, extract_payload
+```bash
+./run configs/1-1-basic.conf
 ```
 
-### Logging (stderr)
-
-Match the starter code style — log received messages like:
-
-```
-Received message <raw bytes or decoded string>
-```
-
-The sender logs `Sending message '...'` and `Received message ...` the same way.
-
----
-
-## How to test
-
-1. Grab the official starter files from Khoury if we don't have them yet: `run`, `configs/`, `test`
-2. Build:
-  ```bash
-   make
-  ```
-3. Run all tests:
-  ```bash
-   ./test
-  ```
-4. Debug one config:
-  ```bash
-   ./run configs/<some-config>
-  ```
-
-If you see `Success! Data was transmitted correctly.` you're good.
-
-You can also test manually in two terminals:
+Manual test in two terminals:
 
 ```bash
 # terminal 1
 ./4700recv
 
-# terminal 2 (use the port from terminal 1)
+# terminal 2 (use the port printed by the receiver)
 echo "hello world" | ./4700send 127.0.0.1 <port>
 ```
 
----
+`4700send` takes `<host> <port>` and reads from stdin until EOF. It exits once the receiver has acked everything including the FIN packet. `4700recv` takes no arguments, prints `Bound to port <port>` as its first stderr line, and never exits on its own (the simulator kills it after the sender finishes).
 
-## Files overview
+Debug output goes to stderr. Only the received file data goes to stdout on the receiver.
 
+## Approach
 
-| file        | owner  | status                 |
-| ----------- | ------ | ---------------------- |
-| `4700send`  | Rohit  | done                   |
-| `4700recv`  | Aditya | **you implement this** |
-| `packet.py` | shared | done                   |
-| `Makefile`  | shared | done                   |
+### Packet format
+
+All packets are JSON with a CRC32 checksum field. `packet.py` handles encode/decode and drops anything that fails the checksum.
 
 
+| type   | fields                 | meaning                               |
+| ------ | ---------------------- | ------------------------------------- |
+| `data` | `seq`, `data` (base64) | one chunk of file data                |
+| `ack`  | `ack`                  | next seq number expected (cumulative) |
+| `fin`  | `seq`                  | end of transfer                       |
+
+
+Raw payload per data packet is capped at 1070 bytes so the full encoded UDP datagram stays under the 1500-byte limit.
+
+### Sender (`4700send`)
+
+The sender uses a sliding window (Go-Back-N). Sequence numbers start at 0. It reads stdin in chunks, sends data packets while the window allows, and waits for cumulative ACKs.
+
+- Window starts at 3 and grows by 1 on each new ACK, up to 20.
+- On timeout, the window halves and up to 4 unacked packets are retransmitted.
+- Two duplicate ACKs for the same base trigger a fast retransmit of the oldest unacked packet.
+- RTO starts at 0.5s. Before the first RTT sample, timeouts wait at least 1.0s so early packets are not retransmitted too soon on high-delay links. After that, RTO is based on measured RTT (`max(2 * srtt, srtt + 4 * rttvar)`).
+- Corrupted ACKs are ignored (treated like a lost packet).
+- After stdin EOF and all data is acked, the sender sends a `fin` packet and exits once that is acked.
+
+The main loop uses `select` on the socket, stdin, and a retransmit timer. `fill_window()` sends as many new packets as the window allows instead of waiting one select cycle per packet.
+
+### Receiver (`4700recv`)
+
+The receiver tracks `next_expected` (starts at 0) and a buffer dict for out-of-order packets.
+
+- On an in-order `data` packet, it writes the payload to stdout and bumps `next_expected`.
+- Out-of-order packets go into the buffer. `drain()` prints anything that is now contiguous.
+- Duplicates (`seq < next_expected`) are ignored.
+- Corrupted packets are dropped with no ACK.
+- On a valid `fin` with the right seq, it advances past the fin and keeps running.
+- Every valid `data` or `fin` packet gets an ACK with the current `next_expected`.
+
+Data is written with `sys.stdout.buffer.write` so binary content is not mangled.
+
+## Challenges
+
+**Packet size.** First version used 1200-byte payloads. Base64 plus JSON plus the checksum pushed packets over 1500 bytes and the simulator dropped them. Lowered `MAX_PAYLOAD_SIZE` to 1070 after checking encoded size.
+
+**Retransmit overhead.** Retransmitting the entire window on every timeout passed correctness tests but blew past the byte overhead limits on several configs. Capped timeout retransmits to 4 packets and only retransmit the base packet on fast retransmit.
+
+**Jitter and lifetime limits.** On `3-2-more-jitter.conf` the sender was running out of time because INITIAL_RTO of 0.5s fired before the first ACK on a 0.5s-delay link. Added `FIRST_ACK_RTO` so the first timeout waits at least 1.0s, then switches to the measured RTT.
+
+**Out-of-order delivery.** Level 3 configs deliver packets out of order. The receiver buffers anything ahead of `next_expected` and drains when the gap fills in. The sender keeps multiple packets in flight with the sliding window.
+
+**Corrupted packets.** Level 5 configs mangle packets. Both sides use `decode_packet()` from `packet.py` and treat a bad checksum as a lost packet.
+
+## Testing
+
+Ran `./test` locally. All 18 configs pass:
+
+- 1-1, 1-2: basic transfer
+- 2-1: duplicates
+- 3-1, 3-2: jitter
+- 4-1, 4-2: drops
+- 5-1, 5-2: corruption (mangle)
+- 6-1, 6-2, 6-3: latency
+- 7-1, 7-2, 7-3: bandwidth
+- 8-1, 8-2, 8-3: combined stress tests
+
+For a failing config, `./run configs/<name>` prints full sender and receiver logs plus whether data matched and byte overhead stats. Also tested manually with `echo "hello world" | ./4700send 127.0.0.1 <port>` against a running `./4700recv`.

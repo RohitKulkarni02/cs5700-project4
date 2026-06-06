@@ -44,15 +44,16 @@ Debug output goes to stderr. Only the received file data goes to stdout on the r
 
 ### Packet format
 
-All packets are JSON with a CRC32 checksum field. `packet.py` handles encode/decode and drops anything that fails the checksum.
+Packets use a compact binary header followed by the raw payload. `packet.py` handles encode/decode and drops anything that fails the checksum.
 
-| type   | fields                 | meaning                               |
-| ------ | ---------------------- | ------------------------------------- |
-| `data` | `seq`, `data` (base64) | one chunk of file data                |
-| `ack`  | `ack`                  | next seq number expected (cumulative) |
-| `fin`  | `seq`                  | end of transfer                       |
+| field | size | meaning |
+| ----- | ---- | ------- |
+| type | 1 byte | 0 = data, 1 = ack, 2 = fin |
+| seq | 4 bytes | sequence number (for ack, the next seq expected) |
+| checksum | 4 bytes | CRC32 over type, seq, and payload |
+| payload | variable | raw file data (data packets only) |
 
-Raw payload per data packet is capped at 1070 bytes so the full encoded UDP datagram stays under the 1500-byte limit.
+The header is 9 bytes, so the raw payload is capped at 1472 bytes to keep the whole datagram at or under the 1500-byte limit. Keeping the payload raw (instead of base64 text in JSON) avoids about a third of the per-byte overhead and lets each packet carry more data.
 
 ### Sender (`4700send`)
 
@@ -60,7 +61,7 @@ The sender uses a sliding window (Go-Back-N). Sequence numbers start at 0. It re
 
 - Window starts at 3 and grows by 1 on each new ACK, up to 20.
 - On timeout, the window halves and up to 4 unacked packets are retransmitted.
-- Two duplicate ACKs for the same base trigger a fast retransmit of the oldest unacked packet.
+- Three duplicate ACKs for the same base trigger a fast retransmit of the oldest unacked packet. The threshold is set at three because the test networks duplicate ACKs, and a lower value caused unnecessary resends.
 - RTO starts at 0.5s. Before the first RTT sample, timeouts wait at least 1.0s so early packets are not retransmitted too soon on high-delay links. After that, RTO is based on measured RTT (`max(2 * srtt, srtt + 4 * rttvar)`).
 - Corrupted ACKs are ignored (treated like a lost packet).
 - After stdin EOF and all data is acked, the sender sends a `fin` packet and exits once that is acked.
@@ -82,7 +83,7 @@ Data is written with `sys.stdout.buffer.write` so binary content is not mangled.
 
 ## Challenges
 
-**Packet size.** First version used 1200-byte payloads. Base64 plus JSON plus the checksum pushed packets over 1500 bytes and the simulator dropped them. Lowered `MAX_PAYLOAD_SIZE` to 1070 after checking encoded size.
+**Encoding overhead.** An early version put base64-encoded data inside JSON. Base64 adds about a third to every byte and JSON adds more, which both pushed packets near the 1500-byte limit and inflated the total bytes sent. Switching to a binary header with a raw payload cut the per-byte overhead to almost nothing and let each packet carry 1472 bytes instead of 1070.
 
 **Retransmit overhead.** Retransmitting the entire window on every timeout passed correctness tests but blew past the byte overhead limits on several configs. Capped timeout retransmits to 4 packets and only retransmit the base packet on fast retransmit.
 

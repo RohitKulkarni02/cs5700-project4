@@ -1,6 +1,6 @@
 # CS 5700 Project 4 - Reliable Transport
 
-A UDP-based reliable transport for sending a file from stdin to a remote receiver. `4700send` reads data, breaks it into packets, and sends them over UDP. `4700recv` receives packets, prints the data to stdout in order, and sends ACKs back. The simulator in `run` drops, delays, reorders, duplicates, and corrupts packets to test that the transfer still works.
+A UDP-based reliable transport protocol that transfers data from stdin to a remote receiver despite loss, corruption, duplication, delay, and reordering. `4700send` reads data, breaks it into packets, and sends them over UDP. `4700recv` receives packets, prints the data to stdout in order, and sends ACKs back. The simulator in `run` drops, delays, reorders, duplicates, and corrupts packets to test that the transfer still works.
 
 ## Files
 
@@ -46,13 +46,11 @@ Debug output goes to stderr. Only the received file data goes to stdout on the r
 
 All packets are JSON with a CRC32 checksum field. `packet.py` handles encode/decode and drops anything that fails the checksum.
 
-
 | type   | fields                 | meaning                               |
 | ------ | ---------------------- | ------------------------------------- |
 | `data` | `seq`, `data` (base64) | one chunk of file data                |
 | `ack`  | `ack`                  | next seq number expected (cumulative) |
 | `fin`  | `seq`                  | end of transfer                       |
-
 
 Raw payload per data packet is capped at 1070 bytes so the full encoded UDP datagram stays under the 1500-byte limit.
 
@@ -67,7 +65,7 @@ The sender uses a sliding window (Go-Back-N). Sequence numbers start at 0. It re
 - Corrupted ACKs are ignored (treated like a lost packet).
 - After stdin EOF and all data is acked, the sender sends a `fin` packet and exits once that is acked.
 
-The main loop uses `select` on the socket, stdin, and a retransmit timer. `fill_window()` sends as many new packets as the window allows instead of waiting one select cycle per packet.
+The main loop uses `select` on the socket and stdin (when the window has room), with a timeout for retransmits. `fill_window()` sends as many new packets as the window allows instead of waiting one select cycle per packet.
 
 ### Receiver (`4700recv`)
 

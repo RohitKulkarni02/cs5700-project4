@@ -63,7 +63,7 @@ class Sender:
         raw = encode_packet(packet)
         self.packets[seq] = raw
         self.send_bytes(raw)
-        self.log("Sending message '%s'" % raw.decode("utf-8"))
+        self.log("Sending data seq %d (%d bytes)" % (seq, len(raw)))
 
     def send_fin(self):
         packet = make_fin_packet(self.fin_seq)
@@ -71,7 +71,7 @@ class Sender:
         self.packets[self.fin_seq] = raw
         self.fin_sent = True
         self.send_bytes(raw)
-        self.log("Sending message '%s'" % raw.decode("utf-8"))
+        self.log("Sending fin seq %d" % self.fin_seq)
 
     def update_rto(self, sample):
         if self.srtt is None:
@@ -124,7 +124,7 @@ class Sender:
 
         if ack_num == self.base:
             self.dup_acks += 1
-            if self.dup_acks >= 2:
+            if self.dup_acks >= 3:
                 self.retransmit_from_base()
                 self.dup_acks = 0
             return

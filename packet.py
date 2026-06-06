@@ -1,113 +1,92 @@
 #!/usr/bin/env python3
 
-import json
+import struct
 import zlib
-import base64
 
 
 MAX_PACKET_SIZE = 1500
-MAX_PAYLOAD_SIZE = 1070
+# 9-byte header (type + seq + checksum) leaves room for the payload while
+# keeping the whole datagram at or under the 1500-byte limit.
+MAX_PAYLOAD_SIZE = 1472
 
+TYPE_CODE = {"data": 0, "ack": 1, "fin": 2}
+CODE_TYPE = {0: "data", 1: "ack", 2: "fin"}
 
-def compute_checksum(packet):
-    """
-    Compute CRC32 checksum over packet contents
-    excluding the checksum field itself.
-    """
-
-    temp = dict(packet)
-
-    if "checksum" in temp:
-        del temp["checksum"]
-
-    payload = json.dumps(
-        temp,
-        sort_keys=True,
-        separators=(",", ":")
-    ).encode("utf-8")
-
-    return zlib.crc32(payload) & 0xffffffff
+HEADER = struct.Struct("!BII")
+HEAD_NO_CRC = struct.Struct("!BI")
 
 
 def encode_packet(packet):
     """
-    Add checksum and convert packet to bytes.
+    Turn a packet dict into bytes: type, seq, CRC32, then the raw payload.
+    The checksum covers the type, seq, and payload.
     """
 
-    pkt = dict(packet)
-    pkt["checksum"] = compute_checksum(pkt)
+    kind = packet["type"]
+    code = TYPE_CODE[kind]
 
-    return json.dumps(pkt).encode("utf-8")
+    if kind == "ack":
+        seq = packet["ack"]
+        payload = b""
+    else:
+        seq = packet["seq"]
+        payload = packet.get("payload", b"")
+
+    head = HEAD_NO_CRC.pack(code, seq)
+    checksum = zlib.crc32(head + payload) & 0xffffffff
+
+    return HEADER.pack(code, seq, checksum) + payload
 
 
 def decode_packet(raw_data):
     """
-    Decode packet and verify checksum.
-
-    Returns:
-        packet dictionary if valid
-        None if corrupted
+    Parse bytes back into a packet dict, returning None if the packet is
+    too short, has an unknown type, or fails the checksum.
     """
 
-    try:
-        packet = json.loads(raw_data.decode("utf-8"))
-
-        if "checksum" not in packet:
-            return None
-
-        received_checksum = packet["checksum"]
-        expected_checksum = compute_checksum(packet)
-
-        if received_checksum != expected_checksum:
-            return None
-
-        return packet
-
-    except Exception:
+    if len(raw_data) < HEADER.size:
         return None
+
+    try:
+        code, seq, checksum = HEADER.unpack(raw_data[:HEADER.size])
+    except struct.error:
+        return None
+
+    payload = raw_data[HEADER.size:]
+    expected = zlib.crc32(raw_data[:HEAD_NO_CRC.size] + payload) & 0xffffffff
+    if checksum != expected:
+        return None
+
+    kind = CODE_TYPE.get(code)
+    if kind is None:
+        return None
+
+    if kind == "ack":
+        return {"type": "ack", "ack": seq}
+    if kind == "fin":
+        return {"type": "fin", "seq": seq}
+    return {"type": "data", "seq": seq, "payload": payload}
 
 
 def make_data_packet(seq, payload):
-    """
-    Create a data packet.
+    """Create a data packet. payload should be bytes."""
 
-    payload should be bytes.
-    """
-
-    encoded_payload = base64.b64encode(payload).decode("utf-8")
-
-    return {
-        "type": "data",
-        "seq": seq,
-        "data": encoded_payload
-    }
+    return {"type": "data", "seq": seq, "payload": payload}
 
 
 def make_ack_packet(next_expected):
-    """
-    Create an ACK packet. ack is the next seq number the receiver expects.
-    """
+    """Create an ACK packet. ack is the next seq number the receiver expects."""
 
-    return {
-        "type": "ack",
-        "ack": next_expected
-    }
+    return {"type": "ack", "ack": next_expected}
 
 
 def make_fin_packet(seq):
-    """
-    Create end-of-transfer packet.
-    """
+    """Create an end-of-transfer packet."""
 
-    return {
-        "type": "fin",
-        "seq": seq
-    }
+    return {"type": "fin", "seq": seq}
 
 
 def extract_payload(packet):
-    """
-    Convert packet payload back to bytes.
-    """
+    """Return the raw payload bytes from a data packet."""
 
-    return base64.b64decode(packet["data"])
+    return packet["payload"]

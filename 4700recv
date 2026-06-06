@@ -71,7 +71,7 @@ class Receiver:
                 self.log("Received message %s" % data)
 
                 ptype = packet.get("type")
-                if ptype == "data" and "seq" in packet and "data" in packet:
+                if ptype == "data" and "seq" in packet and "payload" in packet:
                     self.handle_data(packet)
                     self.send_ack(addr)
                 elif ptype == "fin" and "seq" in packet:

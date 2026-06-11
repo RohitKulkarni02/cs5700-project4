@@ -36,7 +36,7 @@ Manual test in two terminals:
 echo "hello world" | ./4700send 127.0.0.1 <port>
 ```
 
-`4700send` takes `<host> <port>` and reads from stdin until EOF. It exits once the receiver has acked everything including the FIN packet. `4700recv` takes no arguments, prints `Bound to port <port>` as its first stderr line, and never exits on its own (the simulator kills it after the sender finishes).
+`4700send` takes `<host> <port>` and reads from stdin until EOF. It exits once the receiver has acked everything including the fin packet. `4700recv` takes no arguments, prints `Bound to port <port>` as its first stderr line, and never exits on its own the simulator kills it after the sender finishes.
 
 Debug output goes to stderr. Only the received file data goes to stdout on the receiver.
 
@@ -46,31 +46,31 @@ Debug output goes to stderr. Only the received file data goes to stdout on the r
 
 Packets use a compact binary header followed by the raw payload. `packet.py` handles encode/decode and drops anything that fails the checksum.
 
-| field | size | meaning |
-| ----- | ---- | ------- |
-| type | 1 byte | 0 = data, 1 = ack, 2 = fin |
-| seq | 4 bytes | sequence number (for ack, the next seq expected) |
-| checksum | 4 bytes | CRC32 over type, seq, and payload |
-| payload | variable | raw file data (data packets only) |
+| field    | size     | meaning                                          |
+| -------- | -------- | ------------------------------------------------ |
+| type     | 1 byte   | 0 = data, 1 = ack, 2 = fin                       |
+| seq      | 4 bytes  | sequence number (for ack, the next seq expected) |
+| checksum | 4 bytes  | CRC32 over type, seq, and payload                |
+| payload  | variable | raw file data (data packets only)                |
 
-The header is 9 bytes, so the raw payload is capped at 1472 bytes to keep the whole datagram at or under the 1500-byte limit. Keeping the payload raw (instead of base64 text in JSON) avoids about a third of the per-byte overhead and lets each packet carry more data.
+The header is 9 bytes, so the raw payload is capped at 1472 bytes to keep the whole datagram at or under the 1500-byte limit. Keeping the payload raw instead of base64 text in JSON avoids about a third of the per-byte overhead and lets each packet carry more data.
 
 ### Sender (`4700send`)
 
-The sender uses a sliding window (Go-Back-N). Sequence numbers start at 0. It reads stdin in chunks, sends data packets while the window allows, and waits for cumulative ACKs.
+The sender uses a sliding-window protocol with cumulative ACKs and receiver-side buffering. Sequence numbers start at 0. It reads stdin in chunks, sends data packets while the window allows, and waits for ACKs.
 
 - Window starts at 3 and grows by 1 on each new ACK, up to 20.
 - On timeout, the window halves and up to 4 unacked packets are retransmitted.
 - Three duplicate ACKs for the same base trigger a fast retransmit of the oldest unacked packet. The threshold is set at three because the test networks duplicate ACKs, and a lower value caused unnecessary resends.
-- RTO starts at 0.5s. Before the first RTT sample, timeouts wait at least 1.0s so early packets are not retransmitted too soon on high-delay links. After that, RTO is based on measured RTT (`max(2 * srtt, srtt + 4 * rttvar)`).
-- Corrupted ACKs are ignored (treated like a lost packet).
-- After stdin EOF and all data is acked, the sender sends a `fin` packet and exits once that is acked.
+- RTO starts at 0.5s. Before the first RTT sample, timeouts wait at least 1.0s so early packets are not retransmitted too soon on high-delay links. After that, RTO is based on measured RTT (`max(2 * srtt, srtt + 4 * rttvar)`). On a timeout the RTO is multiplied by 1.5 up to a 10s cap, and it drops back to the RTT-based value once a fresh ACK arrives.
+- Corrupted ACKs are ignored and treated like a lost packet.
+- After stdin EOF and all data is acknowleged, the sender sends a `fin` packet and exits once that is acked.
 
-The main loop uses `select` on the socket and stdin (when the window has room), with a timeout for retransmits. `fill_window()` sends as many new packets as the window allows instead of waiting one select cycle per packet.
+The main loop uses `select` on the socket and stdin when the window has room, with a timeout for retransmits. `fill_window()` sends as many new packets as the window allows instead of waiting one select cycle per packet.
 
 ### Receiver (`4700recv`)
 
-The receiver tracks `next_expected` (starts at 0) and a buffer dict for out-of-order packets.
+The receiver tracks `next_expected` whic starts at 0 and a buffer dict for out-of-order packets.
 
 - On an in-order `data` packet, it writes the payload to stdout and bumps `next_expected`.
 - Out-of-order packets go into the buffer. `drain()` prints anything that is now contiguous.
@@ -81,11 +81,22 @@ The receiver tracks `next_expected` (starts at 0) and a buffer dict for out-of-o
 
 Data is written with `sys.stdout.buffer.write` so binary content is not mangled.
 
+## Design features
+
+A few parts of the design that we think work well:
+
+- The binary packet format keeps overhead low. Each packet adds only a 9-byte header, so almost all of every datagram is real file data.
+- Cumulative ACKs mean a lost ACK is usually covered by the next one, so the sender does not depend on a reply for every single packet.
+- The receiver buffers out-of-order packets and drains them in order, so reordering or a single loss does not force the whole window to be resent.
+- The window grows and shrinks with the network, so the sender speeds up on clean links and backs off when packets start dropping.
+- Every packet carries a CRC32 checksum, so both sides drop corrupted data instead of acting on it.
+- The sender measures RTT from ACKs and sizes its timeout from that, so it adapts to fast and slow links instead of using one fixed value.
+
 ## Challenges
 
-**Encoding overhead.** An early version put base64-encoded data inside JSON. Base64 adds about a third to every byte and JSON adds more, which both pushed packets near the 1500-byte limit and inflated the total bytes sent. Switching to a binary header with a raw payload cut the per-byte overhead to almost nothing and let each packet carry 1472 bytes instead of 1070.
+**Encoding overhead.** An early version put base64-encoded data inside JSON. Base64 adds about a third to every byte and JSON adds more, which both pushed packets near the 1500-byte limit and inflated the total bytes sent. We switched to a binary header with a raw payload dropped the per-packet overhead to a fixed 9 bytes and let each packet carry 1472 bytes instead of 1070.
 
-**Retransmit overhead.** Retransmitting the entire window on every timeout passed correctness tests but blew past the byte overhead limits on several configs. Capped timeout retransmits to 4 packets and only retransmit the base packet on fast retransmit.
+**Retransmit overhead.** Retransmitting the entire window on every timeout passed correctness tests but blew past the byte overhead limits on several configs. Capped the timeout retransmits to 4 packets and only retransmit the base packet on fast retransmit.
 
 **Jitter and lifetime limits.** On `3-2-more-jitter.conf` the sender was running out of time because INITIAL_RTO of 0.5s fired before the first ACK on a 0.5s-delay link. Added `FIRST_ACK_RTO` so the first timeout waits at least 1.0s, then switches to the measured RTT.
 
